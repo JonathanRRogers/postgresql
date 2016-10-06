@@ -1,0 +1,264 @@
+Allows an external copy command, such as cp, to be used to copy files
+
+diff -ru postgresql-9.5.3/src/backend/commands/dbcommands.c postgresql-9.5.3_external_copy/src/backend/commands/dbcommands.c
+--- postgresql-9.5.3/src/backend/commands/dbcommands.c	2016-05-09 16:50:23.000000000 -0400
++++ postgresql-9.5.3_external_copy/src/backend/commands/dbcommands.c	2016-10-05 00:45:01.596215499 -0400
+@@ -23,6 +23,7 @@
+ #include <locale.h>
+ #include <unistd.h>
+ #include <sys/stat.h>
++#include <sys/wait.h>
+ 
+ #include "access/genam.h"
+ #include "access/heapam.h"
+@@ -49,6 +50,7 @@
+ #include "pgstat.h"
+ #include "postmaster/bgwriter.h"
+ #include "replication/slot.h"
++#include "postmaster/fork_process.h"
+ #include "storage/copydir.h"
+ #include "storage/fd.h"
+ #include "storage/lmgr.h"
+@@ -615,7 +617,10 @@
+ 			 *
+ 			 * We don't need to copy subdirectories
+ 			 */
+-			copydir(srcpath, dstpath, false);
++			if (external_copy_command)
++				external_copydir(srcpath, dstpath);
++			else
++				copydir(srcpath, dstpath, false);
+ 
+ 			/* Record the filesystem change in XLOG */
+ 			{
+@@ -1829,6 +1834,61 @@
+ 	return result;
+ }
+ 
++
++#define MAX_RM_TABLESPACE_WORDS 10
++char *rm_tablespace_dir_command = NULL;
++
++
++/* Remove a single tablespace directory by calling an external command */
++void
++external_rm_tablespace_dir(char *dir)
++{
++	char	   *cmd_path;
++	/* leave space for directory names and terminator */
++	char	   *argv[MAX_RM_TABLESPACE_WORDS + 3];
++	int			argc = 0;
++	pid_t		pid;
++	int			status;
++
++	char	   *sc = strdup(rm_tablespace_dir_command);
++	char	   *token;
++
++	Assert(sc);
++	token = strtok(sc, " ");
++	while (token)
++	{
++		ereport(DEBUG1, (errmsg("Appending \"%s\"", token)));
++		argv[argc++] = token;
++		Assert(argc <= MAX_RM_TABLESPACE_WORDS);
++		token = strtok(NULL, " ");
++	}
++	Assert(argc > 0);
++	argv[argc++] = dir;
++	cmd_path = argv[0];
++	ereport(DEBUG1, (errmsg("Calling %s to delete \"%s\"", cmd_path, dir)));
++	argv[argc] = NULL;
++	Assert(argv[argc] == NULL);
++
++	/* Fire off execv in child */
++	if ((pid = fork_process()) == 0)
++	{
++		if (execv(cmd_path, argv) < 0)
++		{
++			ereport(LOG,
++					(errmsg("could not execute \"%s\"", cmd_path)));
++			/* We're already in the child process here, can't return */
++			exit(1);
++		}
++	}
++	else {
++		waitpid(pid, &status, 0);
++		if (status) {
++		ereport(ERROR, (errmsg("could not delete dir \"%s\"", dir)));
++		}
++	}
++	free(sc);
++}
++
+ /*
+  * Remove tablespace directories
+  *
+@@ -1863,7 +1923,9 @@
+ 			continue;
+ 		}
+ 
+-		if (!rmtree(dstpath, true))
++		if (rm_tablespace_dir_command)
++			external_rm_tablespace_dir(dstpath);
++		else if (!rmtree(dstpath, true))
+ 			ereport(WARNING,
+ 					(errmsg("some useless files may be left behind in old database directory \"%s\"",
+ 							dstpath)));
+Only in postgresql-9.5.3_external_copy/src/backend/commands: dbcommands.c.orig
+diff -ru postgresql-9.5.3/src/backend/storage/file/copydir.c postgresql-9.5.3_external_copy/src/backend/storage/file/copydir.c
+--- postgresql-9.5.3/src/backend/storage/file/copydir.c	2016-05-09 16:50:23.000000000 -0400
++++ postgresql-9.5.3_external_copy/src/backend/storage/file/copydir.c	2016-10-05 00:45:01.596215499 -0400
+@@ -21,11 +21,72 @@
+ #include <fcntl.h>
+ #include <unistd.h>
+ #include <sys/stat.h>
++#include <sys/wait.h>
+ 
+ #include "storage/copydir.h"
+ #include "storage/fd.h"
+ #include "miscadmin.h"
+ 
++#include "postmaster/fork_process.h"
++
++#define MAX_COPY_COMMAND_WORDS 10
++char *external_copy_command = NULL;
++
++
++/*
++ * copy directory using external command
++ */
++void
++external_copydir(char *fromdir, char *todir)
++{
++	char	   *cp_path;
++	/* leave space for directory names and terminator */
++	char	   *argv[MAX_COPY_COMMAND_WORDS + 3];
++	int			argc = 0;
++	pid_t		pid;
++	int			status;
++
++	char	   *sc = strdup(external_copy_command);
++	char	   *token;
++
++	Assert(sc);
++	token = strtok(sc, " ");
++	while (token)
++	{
++		ereport(DEBUG1, (errmsg("Appending \"%s\"", token)));
++		argv[argc++] = token;
++		Assert(argc <= MAX_COPY_COMMAND_WORDS);
++		token = strtok(NULL, " ");
++	}
++	Assert(argc > 0);
++	argv[argc++] = fromdir;
++	argv[argc++] = todir;
++	cp_path = argv[0];
++	ereport(DEBUG1, (errmsg("Calling %s to copy dir \"%s\" to \"%s\"",
++							cp_path, fromdir, todir)));
++	argv[argc] = NULL;
++	Assert(argv[argc] == NULL);
++
++	/* Fire off execv in child */
++	if ((pid = fork_process()) == 0)
++	{
++		if (execv(cp_path, argv) < 0)
++		{
++			ereport(LOG,
++					(errmsg("could not execute \"%s\"", cp_path)));
++			/* We're already in the child process here, can't return */
++			exit(1);
++		}
++	}
++	else {
++		waitpid(pid, &status, 0);
++		if (status) {
++		ereport(ERROR, (errmsg("could not copy dir \"%s\" \"%s\"",
++							   fromdir, todir)));
++		}
++	}
++	free(sc);
++}
+ 
+ /*
+  * copydir: copy a directory
+diff -ru postgresql-9.5.3/src/backend/utils/misc/guc.c postgresql-9.5.3_external_copy/src/backend/utils/misc/guc.c
+--- postgresql-9.5.3/src/backend/utils/misc/guc.c	2016-05-09 16:50:23.000000000 -0400
++++ postgresql-9.5.3_external_copy/src/backend/utils/misc/guc.c	2016-10-05 00:45:01.600215426 -0400
+@@ -33,6 +33,7 @@
+ #include "access/xact.h"
+ #include "catalog/namespace.h"
+ #include "commands/async.h"
++#include "commands/dbcommands.h"
+ #include "commands/prepare.h"
+ #include "commands/vacuum.h"
+ #include "commands/variable.h"
+@@ -63,6 +64,7 @@
+ #include "replication/walreceiver.h"
+ #include "replication/walsender.h"
+ #include "storage/bufmgr.h"
++#include "storage/copydir.h"
+ #include "storage/dsm_impl.h"
+ #include "storage/standby.h"
+ #include "storage/fd.h"
+@@ -625,6 +627,8 @@
+ 	gettext_noop("Customized Options"),
+ 	/* DEVELOPER_OPTIONS */
+ 	gettext_noop("Developer Options"),
++	/* FILE_OPERATION_OPTIONS */
++	gettext_noop("File Operation Options"),
+ 	/* help_config wants this array to be null-terminated */
+ 	NULL
+ };
+@@ -2878,6 +2882,28 @@
+ 	},
+ 
+ 	{
++		{"external_copy_command", PGC_BACKEND, DEVELOPER_OPTIONS,
++			gettext_noop("Sets external command to copy a file."),
++			NULL,
++			GUC_NOT_IN_SAMPLE
++		},
++		&external_copy_command,
++		NULL,
++		NULL, NULL, NULL
++	},
++
++	{
++		{"rm_tablespace_dir_command", PGC_BACKEND, DEVELOPER_OPTIONS,
++			gettext_noop("Sets external command to remove tablespace directory."),
++			NULL,
++			GUC_NOT_IN_SAMPLE
++		},
++		&rm_tablespace_dir_command,
++		NULL,
++		NULL, NULL, NULL
++	},
++
++	{
+ 		{"default_tablespace", PGC_USERSET, CLIENT_CONN_STATEMENT,
+ 			gettext_noop("Sets the default tablespace to create tables and indexes in."),
+ 			gettext_noop("An empty string selects the database's default tablespace."),
+Only in postgresql-9.5.3_external_copy/src/backend/utils/misc: guc.c.orig
+diff -ru postgresql-9.5.3/src/include/commands/dbcommands.h postgresql-9.5.3_external_copy/src/include/commands/dbcommands.h
+--- postgresql-9.5.3/src/include/commands/dbcommands.h	2016-05-09 16:50:23.000000000 -0400
++++ postgresql-9.5.3_external_copy/src/include/commands/dbcommands.h	2016-10-05 00:45:01.600215426 -0400
+@@ -30,5 +30,6 @@
+ extern char *get_database_name(Oid dbid);
+ 
+ extern void check_encoding_locale_matches(int encoding, const char *collate, const char *ctype);
++extern char *rm_tablespace_dir_command;
+ 
+ #endif   /* DBCOMMANDS_H */
+Only in postgresql-9.5.3_external_copy/src/include/commands: dbcommands.h.orig
+diff -ru postgresql-9.5.3/src/include/storage/copydir.h postgresql-9.5.3_external_copy/src/include/storage/copydir.h
+--- postgresql-9.5.3/src/include/storage/copydir.h	2016-05-09 16:50:23.000000000 -0400
++++ postgresql-9.5.3_external_copy/src/include/storage/copydir.h	2016-10-05 00:45:01.600215426 -0400
+@@ -15,5 +15,8 @@
+ 
+ extern void copydir(char *fromdir, char *todir, bool recurse);
+ extern void copy_file(char *fromfile, char *tofile);
++extern void external_copydir(char *fromdir, char *todir);
++
++extern char *external_copy_command;
+ 
+ #endif   /* COPYDIR_H */

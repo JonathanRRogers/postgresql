@@ -64,8 +64,8 @@
 Summary: PostgreSQL client programs
 Name: %{?scl_prefix}postgresql
 %global majorversion 9.5
-Version: 9.5.2
-Release: 2%{?dist}
+Version: 9.5.3
+Release: 1%{?dist}
 
 # The PostgreSQL license is very similar to other MIT licenses, but the OSI
 # recognizes it as an independent license, so we do as well.
@@ -99,6 +99,7 @@ Patch4: postgresql-config-comment.patch
 Patch6: postgresql-var-run-socket.patch
 Patch8: postgresql-man.patch
 Patch9: postgresql-socket-dirs-pgupgrade.patch
+Patch900: postgresql-external_copy.patch
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
 
 BuildRequires: perl(ExtUtils::MakeMaker) glibc-devel bison flex gawk
@@ -335,6 +336,7 @@ benchmarks.
 %patch6 -p1
 %patch8 -p1
 %patch9 -p1
+%patch900 -p1
 
 # We used to run autoconf here, but there's no longer any real need to,
 # since Postgres ships with a reasonably modern configure script.
