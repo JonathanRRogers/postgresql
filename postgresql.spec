@@ -392,8 +392,8 @@ cd postgresql-setup-%{setup_version}
     PGMAJORVERSION=%{majorversion} \
     NAME_DEFAULT_PREV_SERVICE=postgresql \
     SCLS=%{?scl} \
-    NAME_SRV_PFX=%{?scl}- \
-    NAME_PKG_PFX=%{?scl}-
+    NAME_SRV_PFX=%{?scl}%{?scl:-} \
+    NAME_PKG_PFX=%{?scl}%{?scl:-}
 
 make %{?_smp_mflags}
 cd ..
